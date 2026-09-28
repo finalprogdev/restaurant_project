@@ -74,6 +74,7 @@ SCHEMAS = {
     "menu": {"name": F(str, "ชื่อเมนู", req=True, max=80),
              "category_id": F(int, "หมวดหมู่", req=True, min=1),
              "price": F(float, "ราคา", req=True, min=0, max=100000),
+             "unit": F(str, "หน่วยเมนู", max=24, default="จาน"),
              "description": F(str, "รายละเอียด", max=200, default=""),
              "image": F(str, "รูปภาพ", pattern=IMAGE_RE, default=""),
              "available": F(bool, "สถานะมีของ", default=True),
@@ -200,6 +201,22 @@ def public_row(entity, row):
     return {k: v for k, v in row.items() if k not in ("password_hash", "session_version")} if entity == "users" else row
 
 
+def new_table_access(db):
+    codes = {str(t.get("access_code", "")) for t in db["tables"]}
+    while True:
+        code = f"{secrets.randbelow(1000000):06d}"
+        if code not in codes:
+            return code
+
+
+def ensure_table_access(db):
+    for table in db["tables"]:
+        if not table.get("qr_token"):
+            table["qr_token"] = secrets.token_hex(16)
+        if not table.get("access_code"):
+            table["access_code"] = new_table_access(db)
+
+
 def list_entity(db, entity, params):
     cfg = ENTITIES[entity]
     rows = [public_row(entity, r) for r in db[entity]]
@@ -257,7 +274,8 @@ def _prepare(db, entity, row, data, old):
         if old:
             _check_admin_left(db, old, row)
     elif entity == "tables" and old is None:
-        row["qr_token"] = secrets.token_hex(8)
+        row["qr_token"] = secrets.token_hex(16)
+        row["access_code"] = new_table_access(db)
     elif entity == "reservations":
         for key, fmt in (("date", "%Y-%m-%d"), ("time", "%H:%M")):
             if key in row:
@@ -320,11 +338,11 @@ def update_settings(db, data):
 
 # ---------- menu ----------
 def menu_view(db):
-    keys = ("id", "name", "category_id", "price", "description", "image", "available",
+    keys = ("id", "name", "category_id", "price", "unit", "description", "image", "available",
             "has_spice", "has_egg", "has_size")
     s = db["settings"]
     return {"categories": sorted(db["categories"], key=lambda c: c["sort"]),
-            "items": [{k: m[k] for k in keys} for m in db["menu"]],
+            "items": [{k: m.get(k, "จาน" if k == "unit" else "") for k in keys} for m in db["menu"]],
             "spice": SPICE, "sizes": SIZES, "egg_price": s["egg_price"], "size_price": s["size_price"]}
 
 
@@ -375,6 +393,55 @@ def events_for(db, role, since):
     return {"last": last, "events": [e for e in db["events"] if e["id"] > since and e["target"] in targets]}
 
 
+def notification_targets(role):
+    return {"kitchen": ("kitchen",), "cashier": ("staff",), "admin": ("kitchen", "staff")}[role]
+
+
+def notification_view(db, user, session_id):
+    targets = notification_targets(user["role"])
+    state = _notification_session(db, user, session_id)
+    if state is None:
+        return {"events": [], "unread": 0}
+    events = [event for event in db["events"]
+              if event["id"] > state["start_event_id"] and event["target"] in targets]
+    read_ids = set(state["read_ids"])
+    rows = [{**event, "read": event["id"] in read_ids} for event in events]
+    return {"events": sorted(rows, key=lambda event: event["id"], reverse=True),
+            "unread": sum(not event["read"] for event in rows)}
+
+
+def _notification_session(db, user, session_id):
+    state = db.setdefault("notification_sessions", {}).get(str(session_id or ""))
+    if not state or state.get("user_id") != user["id"]:
+        return None
+    return state
+
+
+def notification_unread(db, user, session_id):
+    targets = notification_targets(user["role"])
+    state = _notification_session(db, user, session_id)
+    if state is None:
+        return 0
+    read_ids = set(state["read_ids"])
+    return sum(event["target"] in targets and event["id"] > state["start_event_id"] and event["id"] not in read_ids
+               for event in db["events"])
+
+
+def mark_notification_read(db, user, session_id, event_id):
+    targets = notification_targets(user["role"])
+    state = _notification_session(db, user, session_id)
+    if state is None:
+        raise AppError("เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่", 401)
+    event = next((event for event in db["events"]
+                 if event["id"] == to_int(event_id, -1) and event["target"] in targets
+                 and event["id"] > state["start_event_id"]), None)
+    if event is None:
+        raise AppError("ไม่พบการแจ้งเตือนนี้", 404)
+    retained = {item["id"] for item in db["events"]
+                if item["id"] > state["start_event_id"] and item["target"] in targets}
+    state["read_ids"] = sorted((set(state["read_ids"]) | {event["id"]}) & retained)
+
+
 # ---------- tables and orders ----------
 def amount(item):
     return r2((item["price"] + item["extra"]) * item["qty"])
@@ -409,6 +476,7 @@ def tables_view(db):
 
 def item_view(item):
     return {"id": item["id"], "name": item["name"], "qty": item["qty"], "status": item["status"],
+            "unit": item.get("unit", "จาน"),
             "options": " · ".join(item["options"].values()), "note": item["note"],
             "amount": amount(item), "source": item["source"]}
 
@@ -433,7 +501,7 @@ def add_item(db, table_id, menu_id, qty, options, note, source):
     change_stock(db, menu, qty, -1)
     order = open_order(db, table_id, create=True)
     item = {"id": next_id(db, "items"), "menu_id": menu["id"], "name": menu["name"],
-            "price": menu["price"], "extra": extra, "qty": qty, "options": chosen,
+            "price": menu["price"], "extra": extra, "qty": qty, "unit": menu.get("unit") or "จาน", "options": chosen,
             "note": str(note or "").strip()[:100], "status": "pending",
             "created_at": now_str(), "source": source, "paid": False}
     order["items"].append(item)
@@ -559,7 +627,9 @@ def checkout(db, order_id, data, cashier, commit=True):
     earned = int(calc["total"] // s["point_per_baht"]) if member else 0
     table = get(db, "tables", order["table_id"])
     bill = {"id": 0, "order_id": order["id"], "table_id": table["id"], "table_name": table["name"],
-            "items": [{"name": i["name"], "options": " · ".join(i["options"].values()), "qty": i["qty"],
+            "items": [{"menu_id": i.get("menu_id"), "name": i["name"],
+                       "options": " · ".join(i["options"].values()), "qty": i["qty"],
+                       "unit": i.get("unit", "จาน"),
                        "price": r2(i["price"] + i["extra"]), "amount": amount(i)} for i in items],
             "subtotal": subtotal, "discount": discount, "redeem": redeem, **calc,
             "vat_rate": s["vat"], "service_rate": s["service"], "method": method,
@@ -578,17 +648,22 @@ def checkout(db, order_id, data, cashier, commit=True):
         table["status"] = "occupied"
     else:
         order["status"], table["status"] = "paid", "free"
+        table["qr_token"] = secrets.token_hex(16)
+        table["access_code"] = new_table_access(db)
     return bill
 
 
 # ---------- reports ----------
 def daily_report(db, date):
     bills = [b for b in db["bills"] if b["date"] == date]
+    menu_units = {menu["name"]: menu.get("unit") or "จาน" for menu in db["menu"]}
     sold, methods = {}, {}
     for bill in bills:
         methods[bill["method"]] = r2(methods.get(bill["method"], 0) + bill["total"])
         for line in bill["items"]:
-            row = sold.setdefault(line["name"], {"name": line["name"], "qty": 0, "revenue": 0.0})
+            unit = line.get("unit") or menu_units.get(line["name"], "จาน")
+            key = (line["name"], unit)
+            row = sold.setdefault(key, {"name": line["name"], "unit": unit, "qty": 0, "revenue": 0.0})
             row["qty"] += line["qty"]
             row["revenue"] = r2(row["revenue"] + line["amount"])
     sales = r2(sum(b["total"] for b in bills))
@@ -641,8 +716,27 @@ def check_table_token(db, table_id, token):
     return table
 
 
+def enter_table(db, table):
+    if table["status"] == "billing":
+        raise AppError("โต๊ะกำลังเช็คบิล กรุณารอพนักงาน", 409)
+    table["status"] = "occupied"
+    return table
+
+
+def check_table_code(db, code):
+    normalized = str(code or "").strip()
+    if not re.fullmatch(r"\d{6}", normalized):
+        raise AppError("รหัสโต๊ะไม่ถูกต้อง", 404)
+    table = next((t for t in db["tables"] if hmac.compare_digest(str(t.get("access_code", "")), normalized)), None)
+    if table is None:
+        raise AppError("รหัสโต๊ะไม่ถูกต้อง", 404)
+    return enter_table(db, table)
+
+
 def customer_order(db, table_id, token, items):
-    check_table_token(db, table_id, token)
+    table = enter_table(db, check_table_token(db, table_id, token))
+    if table["status"] == "billing":
+        raise AppError("โต๊ะกำลังเช็คบิล กรุณารอพนักงาน", 409)
     if not isinstance(items, list) or not 1 <= len(items) <= 20:
         raise AppError("กรุณาเลือกรายการอาหาร (สูงสุด 20 รายการต่อครั้ง)")
     for line in items:
@@ -677,6 +771,13 @@ def seed(db):
                             "phone": "", "role": "admin", "active": True, "points": 0,
                             "session_version": 0,
                             "password_hash": hash_password(password)})
+    ensure_table_access(db)
+    for item in db["menu"]:
+        if not item.get("unit"):
+            item["unit"] = "จาน"
+    for queue_item in db["queue"]:
+        if queue_item.get("status") not in ("waiting", "called", "seated", "cancelled"):
+            queue_item["status"] = "waiting"
     if db["categories"] or db["menu"] or db["tables"]:
         return
     for n, name in enumerate(("อาหารจานเดียว", "ต้ม / ยำ", "เครื่องดื่ม"), 1):
@@ -694,9 +795,11 @@ def seed(db):
                ("น้ำอัดลม", 3, 20, False, False, False, ((5, 1),)))
     for name, cat, price, spice, egg, size, recipe in samples:
         db["menu"].append({"id": next_id(db, "menu"), "name": name, "category_id": cat, "price": float(price),
+                           "unit": "ขวด" if cat == 3 else "จาน",
                            "description": "", "image": "", "available": True, "has_spice": spice,
                            "has_egg": egg, "has_size": size,
                            "recipe": [{"ingredient_id": i, "qty": float(q)} for i, q in recipe]})
     for n in range(1, 7):
         db["tables"].append({"id": next_id(db, "tables"), "name": f"T{n}", "seats": 4 if n <= 4 else 6,
-                             "status": "free", "qr_token": secrets.token_hex(8)})
+                             "status": "free", "qr_token": secrets.token_hex(16),
+                             "access_code": new_table_access(db)})

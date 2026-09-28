@@ -22,7 +22,7 @@ async function loadOrder() {
     <label class="check"><input type="checkbox" data-pick="${i.id}" ${picked.has(i.id) ? 'checked' : ''} aria-label="เลือกเพื่อแยกบิล"></label>
     <div class="grow"><b>${esc(i.name)}</b> <span class="pill ${i.status}">${LBL[i.status]}</span>
       <div class="muted">${esc(i.options)}${i.note ? ' · 📝 ' + esc(i.note) : ''}</div></div>
-    <div class="qty">${i.status === 'pending' && i.qty > 1 ? `<button class="btn sm" data-act="qty" data-i="${i.id}" data-q="${i.qty - 1}">−</button>` : ''}<b>${i.qty}</b>
+    <div class="qty">${i.status === 'pending' && i.qty > 1 ? `<button class="btn sm" data-act="qty" data-i="${i.id}" data-q="${i.qty - 1}">−</button>` : ''}<b>${i.qty} ${esc(i.unit || 'จาน')}</b>
       ${i.status === 'pending' ? `<button class="btn sm" data-act="qty" data-i="${i.id}" data-q="${i.qty + 1}">+</button>` : ''}</div>
     <div class="right">฿${baht(i.amount)}</div>
     <button class="btn sm danger" data-act="cancel" data-i="${i.id}" aria-label="ยกเลิกรายการ">×</button></div>`).join('') : '<p class="muted">ยังไม่มีรายการ</p>';

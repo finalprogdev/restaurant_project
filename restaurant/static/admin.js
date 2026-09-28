@@ -12,13 +12,17 @@ const FMT = {
   tbl: v => esc(L.tables.find(t => t.id === v)?.name ?? '-'),
   avail: v => v ? '<span class="pill ok">มีของ</span>' : '<span class="pill bad">หมด</span>',
   lbl: v => `<span class="pill ${esc(v)}">${esc(LBL[v] || v)}</span>`,
+  queueStatus: v => {
+    const state = ['waiting', 'called', 'seated', 'cancelled'].includes(v) ? v : 'waiting';
+    return `<span class="pill ${state}">${esc(LBL[state])}</span>`;
+  },
 };
 
 // cols: [key, label, formatter, sortable]   fields: [key, label, type, options()]
 const ENT = {
-  menu: {title: 'เมนู', filter: ['available', [['true', 'มีของ'], ['false', 'หมด']]], def: {available: true},
-    cols: [['id', '#'], ['image', 'รูป', 'img', 0], ['name', 'ชื่อ'], ['category_id', 'หมวด', 'cat'], ['price', 'ราคา', 'money'], ['available', 'สถานะ', 'avail']],
-    fields: [['name', 'ชื่อเมนู', 'text'], ['category_id', 'หมวดหมู่', 'select', () => L.categories.map(c => [c.id, c.name])], ['price', 'ราคา (บาท)', 'number'],
+  menu: {title: 'เมนู', filter: ['available', [['true', 'มีของ'], ['false', 'หมด']]], def: {available: true, unit: 'จาน'},
+    cols: [['id', '#'], ['image', 'รูป', 'img', 0], ['name', 'ชื่อ'], ['category_id', 'หมวด', 'cat'], ['price', 'ราคา', 'money'], ['unit', 'หน่วย'], ['available', 'สถานะ', 'avail']],
+    fields: [['name', 'ชื่อเมนู', 'text'], ['category_id', 'หมวดหมู่', 'select', () => L.categories.map(c => [c.id, c.name])], ['price', 'ราคา (บาท)', 'number'], ['unit', 'หน่วยที่ขาย เช่น จาน, แก้ว, ขวด', 'text'],
       ['description', 'รายละเอียด', 'text'], ['image', 'รูปภาพ', 'image'], ['available', 'มีของ (ไม่ติ๊ก = หมด)', 'check'],
       ['has_spice', 'เลือกระดับความเผ็ดได้', 'check'], ['has_egg', 'เพิ่มไข่ได้', 'check'], ['has_size', 'เลือกขนาดได้', 'check'], ['recipe', 'สูตรอาหาร (ตัดสต็อกอัตโนมัติ)', 'recipe']]},
   categories: {title: 'หมวดหมู่', def: {sort: 0}, cols: [['id', '#'], ['name', 'ชื่อ'], ['sort', 'ลำดับ']],
@@ -38,7 +42,7 @@ const ENT = {
       ['table_id', 'โต๊ะ', 'select', () => [['', '- ยังไม่กำหนด -'], ...L.tables.map(t => [t.id, t.name])]], ['note', 'หมายเหตุ', 'text'],
       ['status', 'สถานะ', 'select', () => pairs(['pending', 'confirmed', 'seated', 'cancelled'])]]},
   queue: {title: 'คิว', filter: ['status', pairs(['waiting', 'called', 'seated', 'cancelled'])], def: {status: 'waiting', party: 2},
-    cols: [['number', 'คิว'], ['date', 'วันที่'], ['name', 'ชื่อ'], ['phone', 'โทร'], ['party', 'คน'], ['status', 'สถานะ', 'lbl']],
+    cols: [['number', 'คิว'], ['date', 'วันที่'], ['name', 'ชื่อ'], ['phone', 'โทร'], ['party', 'คน'], ['status', 'สถานะ', 'queueStatus']],
     fields: [['name', 'ชื่อ', 'text'], ['phone', 'เบอร์โทร', 'text'], ['party', 'จำนวนคน', 'number'], ['status', 'สถานะ', 'select', () => pairs(['waiting', 'called', 'seated', 'cancelled'])]]},
   logs: {title: 'Log', ro: true, filter: ['action', ['create', 'update', 'delete', 'checkout', 'login', 'login_failed', 'upload'].map(a => [a, a])],
     cols: [['ts', 'เวลา'], ['user', 'ผู้ใช้'], ['action', 'การกระทำ'], ['entity', 'ข้อมูล'], ['ref', 'อ้างอิง'], ['detail', 'รายละเอียด', null, 0]]},
@@ -68,7 +72,7 @@ async function dash(date) {
       <div class="card"><small class="muted">โต๊ะที่มีออเดอร์</small><h2>${d.open_orders}</h2></div></div>
     <div class="grid two mt">
       <div class="card stack"><h3>ยอดขาย 7 วันล่าสุด</h3>${d.week.map(w => `<div class="bar"><span>${esc(w.date.slice(5))}</span><i data-w="${Math.round(w.sales / max * 100)}"></i><b>${baht(w.sales)}</b></div>`).join('')}</div>
-      <div class="card stack"><h3>เมนูขายดี</h3>${d.top.length ? d.top.map((t, i) => `<div class="row between"><span>${i + 1}. ${esc(t.name)}</span><span>${t.qty} จาน · ฿${baht(t.revenue)}</span></div>`).join('') : '<p class="muted">ยังไม่มียอดขายในวันนี้</p>'}</div>
+      <div class="card stack"><h3>เมนูขายดี</h3>${d.top.length ? d.top.map((t, i) => `<div class="row between"><span>${i + 1}. ${esc(t.name)}</span><span>${t.qty} ${esc(t.unit)} · ฿${baht(t.revenue)}</span></div>`).join('') : '<p class="muted">ยังไม่มียอดขายในวันนี้</p>'}</div>
       <div class="card stack"><h3>สถานะโต๊ะ</h3>${Object.entries(d.tables).map(([k, v]) => `<div class="row between"><span class="pill ${k}">${LBL[k]}</span><b>${v}</b></div>`).join('')}
         <h3>ช่องทางชำระเงิน</h3>${Object.entries(d.methods).map(([k, v]) => `<div class="row between"><span>${methods[k]}</span><b>฿${baht(v)}</b></div>`).join('') || '<p class="muted">-</p>'}</div>
       <div class="card stack"><h3>วัตถุดิบใกล้หมด</h3>${d.low_stock.map(i => `<div class="row between"><span>${esc(i.name)}</span><b class="err">${i.stock} ${esc(i.unit)}</b></div>`).join('') || '<p class="muted">สต็อกปกติ</p>'}
@@ -176,7 +180,7 @@ function qrDialog(t) {
   const d = document.createElement('dialog');
   d.className = 'modal';
   d.innerHTML = `<div class="stack c"><h2>โต๊ะ ${esc(t.name)}</h2><img class="qr" alt="QR Code โต๊ะ ${esc(t.name)}" src="${qr.createDataURL(8, 2)}">
-    <p class="muted">สแกนเพื่อสั่งอาหาร<br><small>${esc(link)}</small></p>
+    <p class="muted">สแกนเพื่อสั่งอาหาร หรือกรอกรหัสโต๊ะ <b>${esc(t.access_code || '—')}</b><br><small>${esc(link)}</small></p>
     <div class="row between noprint"><button class="btn" data-act="close-dlg">ปิด</button><button class="btn primary" data-print>พิมพ์</button></div></div>`;
   document.body.append(d);
   d.addEventListener('close', () => d.remove());

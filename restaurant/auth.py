@@ -87,9 +87,18 @@ def load_user():
         return
     uid = session.get("uid")
     if uid:
-        user = next((u for u in storage.load()["users"] if u["id"] == uid), None)
+        db = storage.load()
+        user = next((u for u in db["users"] if u["id"] == uid), None)
         session_version = session.get("session_version", 0)
         if user and user["active"] and session_version == user.get("session_version", 0):
+            notification_id = session.get("notification_session")
+            if notification_id:
+                state = db.get("notification_sessions", {}).get(notification_id)
+                if not state or state.get("user_id") != user["id"]:
+                    session.clear()
+                    return
+            else:
+                session["notification_session"] = _new_notification_session(user)
             g.user = user
         else:
             session.clear()
@@ -102,7 +111,7 @@ def role_required(*roles):
             if g.user is None:
                 if request.path.startswith("/api/"):
                     raise AppError("กรุณาเข้าสู่ระบบ", 401)
-                return redirect(url_for("auth.login"))
+                return redirect(url_for("auth.login", next=request.full_path))
             if g.user["role"] not in roles:
                 raise AppError("คุณไม่มีสิทธิ์เข้าถึงส่วนนี้", 403)
             return fn(*args, **kwargs)
@@ -110,11 +119,29 @@ def role_required(*roles):
     return decorator
 
 
+def _new_notification_session(user):
+    notification_id = secrets.token_urlsafe(24)
+    now = time.time()
+    with storage.transaction() as db:
+        sessions = db.setdefault("notification_sessions", {})
+        for key, value in list(sessions.items()):
+            if now - value.get("created_at", now) > 30 * 24 * 3600:
+                sessions.pop(key, None)
+        sessions[notification_id] = {
+            "user_id": user["id"],
+            "start_event_id": db.get("seq", {}).get("events", 0),
+            "read_ids": [],
+            "created_at": now,
+        }
+    return notification_id
+
+
 def start_session(user):
     session.clear()
     session["uid"] = user["id"]
     session["session_version"] = user.get("session_version", 0)
     session["csrf"] = secrets.token_hex(16)
+    session["notification_session"] = _new_notification_session(user)
     session.permanent = True
 
 
@@ -122,7 +149,7 @@ def start_session(user):
 @bp.route("/login", methods=("GET", "POST"))
 def login():
     if request.method == "GET":
-        return render_template("login.html")
+        return render_template("login.html", next=request.args.get("next", ""))
     username = str(request.form.get("username", "")).strip()
     password = str(request.form.get("password", ""))
     key = f"login:{client_ip()}:{username.lower()}"
@@ -137,6 +164,9 @@ def login():
     _hits.pop(key, None)
     start_session(user)
     logger.log_action(user["username"], "login", "auth")
+    target = str(request.form.get("next", ""))
+    if target.startswith("/") and not target.startswith("//") and "\\" not in target:
+        return redirect(target)
     return redirect(HOME[user["role"]])
 
 
@@ -175,8 +205,52 @@ def register():
     return redirect("/")
 
 
+@bp.route("/change-password", methods=("GET", "POST"))
+@role_required(*ROLES)
+def change_password():
+    if request.method == "GET":
+        return render_template("change_password.html")
+
+    current_password = str(request.form.get("current_password", ""))
+    new_password = str(request.form.get("new_password", ""))
+    confirm_password = str(request.form.get("confirm_password", ""))
+    key = f"change-password:{g.user['id']}:{client_ip()}"
+    if is_blocked(key, 5, 300):
+        return render_template("change_password.html", error="ลองผิดหลายครั้ง กรุณารอ 5 นาที"), 429
+
+    if not verify_password(current_password, g.user.get("password_hash", "")):
+        record_hit(key)
+        return render_template("change_password.html", error="รหัสผ่านปัจจุบันไม่ถูกต้อง"), 400
+
+    try:
+        check_password_policy(new_password)
+        if new_password != confirm_password:
+            raise AppError("รหัสผ่านใหม่และการยืนยันไม่ตรงกัน")
+        if verify_password(new_password, g.user.get("password_hash", "")):
+            raise AppError("กรุณาเลือกรหัสผ่านใหม่ที่ต่างจากรหัสผ่านปัจจุบัน")
+        with storage.transaction() as db:
+            user = next((u for u in db["users"] if u["id"] == g.user["id"]), None)
+            if not user or not user["active"]:
+                session.clear()
+                raise AppError("ไม่พบบัญชีผู้ใช้", 401)
+            user["password_hash"] = hash_password(new_password)
+            user["session_version"] = user.get("session_version", 0) + 1
+            updated_version = user["session_version"]
+    except AppError as e:
+        return render_template("change_password.html", error=e.message), e.status
+
+    _hits.pop(key, None)
+    session["session_version"] = updated_version
+    logger.log_action(g.user["username"], "change_password", "auth")
+    return render_template("change_password.html", success="เปลี่ยนรหัสผ่านเรียบร้อยแล้ว")
+
+
 @bp.post("/logout")
 def logout():
+    notification_id = session.get("notification_session")
+    if notification_id:
+        with storage.transaction() as db:
+            db.setdefault("notification_sessions", {}).pop(notification_id, None)
     if g.user:
         logger.log_action(g.user["username"], "logout", "auth")
     session.clear()

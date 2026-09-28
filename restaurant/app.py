@@ -5,7 +5,7 @@ import re
 import secrets
 import uuid
 
-from flask import Flask, g, jsonify, render_template, request, send_from_directory, session
+from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.exceptions import HTTPException
 
 import auth
@@ -22,6 +22,8 @@ def load_secret():
     key = os.environ.get("SECRET_KEY")
     if key:
         return key
+    if os.environ.get("VERCEL"):
+        raise RuntimeError("ตั้งค่า SECRET_KEY ใน Environment Variables ของ Vercel ก่อน deploy")
     path = os.path.join(storage.DATA_DIR, "secret.key")
     try:
         os.makedirs(storage.DATA_DIR, exist_ok=True)
@@ -65,7 +67,8 @@ def csrf_protect():
 @app.after_request
 def security_headers(resp):
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com; "
+        "default-src 'self'; img-src 'self' data: https://*.public.blob.vercel-storage.com; "
+        "style-src 'self' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; script-src 'self'; frame-ancestors 'none'; "
         "base-uri 'self'; form-action 'self'")
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -127,6 +130,56 @@ def home():
                            menu=db["menu"], today=storage.today_str())
 
 
+@app.get("/reserve")
+@role_required(*auth.ROLES)
+def reserve():
+    return render_template("reserve.html", today=storage.today_str())
+
+
+@app.get("/popular")
+def popular():
+    db = storage.load()
+    menu_by_name = {item["name"]: item for item in db["menu"]}
+    menu_by_id = {item["id"]: item for item in db["menu"]}
+    menu_by_name_unit = {}
+    for menu_item in db["menu"]:
+        menu_by_name_unit.setdefault(menu_item["name"], {})[menu_item.get("unit") or "จาน"] = menu_item
+    sold = {}
+    for bill in db["bills"]:
+        for line in bill.get("items", []):
+            name = str(line.get("name") or "เมนูไม่ระบุชื่อ")
+            menu_id = line.get("menu_id")
+            menu = (menu_by_id.get(menu_id) or
+                    menu_by_name_unit.get(name, {}).get(line.get("unit")) or menu_by_name.get(name))
+            unit = line.get("unit") or (menu or {}).get("unit") or "จาน"
+            qty = services.to_int(line.get("qty"), 0)
+            if qty <= 0:
+                continue
+            key = ("menu", menu_id) if menu_id is not None else ("legacy", name, unit)
+            row = sold.setdefault(key, {"name": name, "menu_id": menu_id, "unit": unit,
+                                        "qty": 0, "revenue": 0.0})
+            row["qty"] += qty
+            amount = services.to_float(line.get("amount"), 0.0)
+            unit_price = services.to_float(line.get("price"), amount / qty)
+            row["revenue"] += amount if amount else unit_price * qty
+    top = sorted(sold.values(), key=lambda item: (-item["qty"], item["name"]))[:10]
+    for item in top:
+        item["avg_price"] = round(item["revenue"] / item["qty"], 2)
+    return render_template("popular.html", top=top, menu_by_name=menu_by_name,
+                           menu_by_name_unit=menu_by_name_unit, menu_by_id=menu_by_id)
+
+
+@app.route("/table-code", methods=("GET", "POST"))
+@role_required(*auth.ROLES)
+def table_code():
+    if request.method == "GET":
+        return render_template("table_code.html", expired=request.args.get("expired") == "1")
+    public_limit("table-code", 10, 60)
+    with storage.transaction() as db:
+        table = services.check_table_code(db, request.form.get("code", ""))
+    return redirect(url_for("customer_table", table_id=table["id"], k=table["qr_token"]))
+
+
 @app.get("/pos")
 @role_required("admin", "cashier")
 def pos():
@@ -145,10 +198,17 @@ def admin():
     return render_template("admin.html")
 
 
+@app.get("/notifications")
+@role_required("admin", "cashier", "kitchen")
+def notifications():
+    return render_template("notifications.html")
+
+
 @app.get("/t/<int:table_id>")
 def customer_table(table_id):
     token = request.args.get("k", "")
-    table = services.check_table_token(storage.load(), table_id, token)
+    with storage.transaction() as db:
+        table = services.enter_table(db, services.check_table_token(db, table_id, token))
     return render_template("order.html", table=table, token=token)
 
 
@@ -162,6 +222,9 @@ def receipt(bill_id):
 def uploads(name):
     if not re.fullmatch(services.IMAGE_RE, name):
         raise AppError("ไม่พบไฟล์", 404)
+    blob_url = storage.upload_url(name)
+    if blob_url:
+        return redirect(blob_url)
     return send_from_directory(storage.UPLOAD_DIR, name)
 
 
@@ -248,6 +311,26 @@ def api_events():
     return ok(**services.events_for(storage.load(), g.user["role"], since))
 
 
+@app.get("/api/notifications")
+@role_required(*auth.STAFF)
+def api_notifications():
+    return ok(**services.notification_view(storage.load(), g.user, session.get("notification_session")))
+
+
+@app.get("/api/notifications/unread")
+@role_required(*auth.STAFF)
+def api_notification_unread():
+    return ok(unread=services.notification_unread(storage.load(), g.user, session.get("notification_session")))
+
+
+@app.post("/api/notifications/<int:event_id>/read")
+@role_required(*auth.STAFF)
+def api_notification_read(event_id):
+    with storage.transaction() as db:
+        services.mark_notification_read(db, g.user, session.get("notification_session"), event_id)
+    return ok()
+
+
 # ---------- API: customer (QR, reservation, queue) ----------
 @app.get("/api/public/order/<int:table_id>")
 def api_public_order(table_id):
@@ -269,12 +352,17 @@ def api_public_send(table_id):
 def api_public_bill(table_id):
     public_limit("bill")
     with storage.transaction() as db:
-        services.check_table_token(db, table_id, body().get("k", ""))
+        table = services.check_table_token(db, table_id, body().get("k", ""))
+        if table["status"] == "billing":
+            raise AppError("ส่งคำขอเช็คบิลแล้ว กรุณารอพนักงาน", 409)
+        if not services.live_items(services.open_order(db, table_id)):
+            raise AppError("ยังไม่มีรายการอาหารให้เช็คบิล", 400)
         services.set_table_status(db, table_id, "billing")
     return ok()
 
 
 @app.post("/api/public/reservations")
+@role_required(*auth.ROLES)
 def api_public_reserve():
     public_limit("reserve", 5, 600)
     with storage.transaction() as db:
@@ -283,6 +371,7 @@ def api_public_reserve():
 
 
 @app.post("/api/public/queue")
+@role_required(*auth.ROLES)
 def api_public_queue():
     public_limit("queue", 5, 600)
     with storage.transaction() as db:
@@ -336,12 +425,11 @@ def api_upload():
     if ext not in ALLOWED_EXT:
         raise AppError("รองรับเฉพาะไฟล์ png, jpg, webp")
     try:
-        if not services.sniff_image(file.stream.read(12)):
+        content = file.stream.read()
+        if not services.sniff_image(content[:12]):
             raise AppError("ไฟล์นี้ไม่ใช่รูปภาพ")
-        file.stream.seek(0)
         name = f"{uuid.uuid4().hex}.{ext}"
-        os.makedirs(storage.UPLOAD_DIR, exist_ok=True)
-        file.save(os.path.join(storage.UPLOAD_DIR, name))
+        storage.save_upload(name, content, file.mimetype or "application/octet-stream")
     except OSError:
         raise AppError("บันทึกไฟล์ไม่สำเร็จ", 500) from None
     audit("upload", "menu", name)
@@ -393,3 +481,4 @@ init_data()
 if __name__ == "__main__":
     app.run(debug=False, port=int(os.environ.get("PORT", 8000)))
 
+print("Hi")

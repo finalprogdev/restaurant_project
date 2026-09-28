@@ -6,7 +6,7 @@
   <h2>สั่งอาหารเอง</h2>
   <div id="menu" class="stack"></div>
   <div class="card stack" id="cart-card"><h3>ตะกร้า</h3><div id="cart"></div><button class="btn primary" data-act="send" id="send" disabled>ส่งออเดอร์</button></div>
-  <div class="card stack"><h3>รายการที่สั่งแล้ว</h3><div id="status"></div><button class="btn" data-act="bill">เรียกเช็คบิล</button></div>
+  <div class="card stack"><h3>รายการที่สั่งแล้ว</h3><div id="status"></div><button class="btn" data-act="bill" id="bill">เรียกเช็คบิล</button></div>
 </section>
 {% endblock %}
 {% block scripts %}<script src="{{ url_for('static', filename='order.js') }}"></script>{% endblock %}

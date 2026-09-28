@@ -5,7 +5,7 @@
   <h2 class="c">{{ brand }}</h2>
   <p class="muted c">ใบเสร็จรับเงิน {{ bill.receipt_no }}<br>{{ bill.created_at }} · โต๊ะ {{ bill.table_name }} · แคชเชียร์ {{ bill.cashier }}</p>
   <table class="lines">
-    {% for i in bill['items'] %}<tr><td>{{ i.name }}{% if i.options %}<br><small>{{ i.options }}</small>{% endif %}</td><td>x{{ i.qty }}</td><td class="right">{{ '%.2f'|format(i.amount) }}</td></tr>{% endfor %}
+    {% for i in bill['items'] %}<tr><td>{{ i.name }}{% if i.options %}<br><small>{{ i.options }}</small>{% endif %}</td><td>{{ i.qty }} {{ i.unit or 'จาน' }}</td><td class="right">{{ '%.2f'|format(i.amount) }}</td></tr>{% endfor %}
   </table>
   <table class="lines sum">
     <tr><td>รวม</td><td class="right">{{ '%.2f'|format(bill.subtotal) }}</td></tr>

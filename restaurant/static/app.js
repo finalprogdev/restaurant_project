@@ -42,7 +42,7 @@ async function api(url, method = 'GET', body) {
   let res, data;
   try { res = await fetch(url, opt); data = await res.json(); }
   catch { throw new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'); }
-  if (!res.ok || !data.ok) throw new Error(data.error || 'เกิดข้อผิดพลาด');
+  if (!res.ok || !data.ok) { const err = new Error(data.error || 'เกิดข้อผิดพลาด'); err.status = res.status; throw err; }
   return data;
 }
 
@@ -65,7 +65,15 @@ function startEvents() {
     const d = await api('/api/events?since=' + last);
     if (last >= 0) d.events.forEach(e => toast('🔔 ' + e.text));
     last = d.last;
+    await refreshNotificationBadge();
   });
+}
+
+async function refreshNotificationBadge() {
+  const dot = $('#notificationDot');
+  if (!dot) return;
+  const result = await api('/api/notifications/unread');
+  dot.hidden = result.unread === 0;
 }
 
 // forms with data-api (reservation / queue on home page)
@@ -94,7 +102,7 @@ function menuPicker(root, menu, onPick) {
     const items = menu.items.filter(m => (!cat || m.category_id === cat) && m.name.toLowerCase().includes(text));
     list.innerHTML = items.map(m => `<button class="card item" data-id="${m.id}" ${m.available ? '' : 'disabled'}>
       ${m.image ? `<img src="/uploads/${esc(m.image)}" alt="">` : '<div class="ph">🍽</div>'}
-      <b>${esc(m.name)}</b><span>฿${baht(m.price)}</span>${m.available ? '' : '<em class="pill bad">หมด</em>'}</button>`).join('') || '<p class="muted">ไม่พบเมนู</p>';
+      <b>${esc(m.name)}</b><span>฿${baht(m.price)} / ${esc(m.unit || 'จาน')}</span>${m.available ? '' : '<em class="pill bad">หมด</em>'}</button>`).join('') || '<p class="muted">ไม่พบเมนู</p>';
   };
   q.oninput = sel.onchange = draw;
   list.onclick = e => { const b = e.target.closest('[data-id]'); if (b) onPick(menu.items.find(m => m.id === +b.dataset.id)); };
@@ -105,7 +113,7 @@ function menuPicker(root, menu, onPick) {
 function itemDialog(item, cfg, onAdd) {
   const d = document.createElement('dialog');
   d.className = 'modal';
-  d.innerHTML = `<form method="dialog" class="stack"><h3>${esc(item.name)} · ฿${baht(item.price)}</h3>
+  d.innerHTML = `<form method="dialog" class="stack"><h3>${esc(item.name)} · ฿${baht(item.price)} / ${esc(item.unit || 'จาน')}</h3>
     ${item.has_spice ? `<label>ความเผ็ด<select name="spice">${cfg.spice.map(s => `<option>${esc(s)}</option>`).join('')}</select></label>` : ''}
     ${item.has_size ? `<label>ขนาด<select name="size">${cfg.sizes.map((s, i) => `<option>${esc(s)}</option>`).join('')}</select><small class="muted">ขนาดพิเศษ +฿${baht(cfg.size_price)}</small></label>` : ''}
     ${item.has_egg ? `<label class="check"><input type="checkbox" name="egg"> เพิ่มไข่ (+฿${baht(cfg.egg_price)})</label>` : ''}
