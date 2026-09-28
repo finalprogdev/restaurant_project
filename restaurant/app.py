@@ -19,28 +19,45 @@ ALLOWED_EXT = {"png", "jpg", "jpeg", "webp"}
 
 
 def load_secret():
-    key = os.environ.get("SECRET_KEY")
+    key = os.environ.get("SECRET_KEY", "").strip()
     if key:
+        if len(key) < 32:
+            raise RuntimeError("SECRET_KEY must contain at least 32 characters")
         return key
-    if os.environ.get("VERCEL"):
-        raise RuntimeError("ตั้งค่า SECRET_KEY ใน Environment Variables ของ Vercel ก่อน deploy")
+    if os.environ.get("VERCEL") or os.environ.get("APP_ENV", "").lower() == "production":
+        raise RuntimeError("Set SECRET_KEY to a stable random value before starting in production")
     path = os.path.join(storage.DATA_DIR, "secret.key")
     try:
         os.makedirs(storage.DATA_DIR, exist_ok=True)
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
-                return f.read().strip()
+                key = f.read().strip()
+            if len(key) < 32:
+                raise RuntimeError("Local secret key is invalid; remove data/secret.key and restart")
+            return key
         key = secrets.token_hex(32)
         with open(path, "w", encoding="utf-8") as f:
             f.write(key)
         return key
-    except OSError:
-        return secrets.token_hex(32)  # sessions reset on restart; set SECRET_KEY to avoid this
+    except OSError as e:
+        raise RuntimeError("Cannot persist the local session key; set SECRET_KEY") from e
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 app = Flask(__name__)
+is_production = bool(os.environ.get("VERCEL")) or os.environ.get("APP_ENV", "").lower() == "production"
+if is_production and not storage.DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is required in production; local JSON storage is not durable")
+if is_production and not storage.BLOB_TOKEN:
+    raise RuntimeError("BLOB_READ_WRITE_TOKEN is required in production for durable menu images")
 app.config.update(SECRET_KEY=load_secret(), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
-                  SESSION_COOKIE_SECURE=bool(os.environ.get("VERCEL")), MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+                  SESSION_COOKIE_SECURE=env_flag("COOKIE_SECURE", is_production), MAX_CONTENT_LENGTH=2 * 1024 * 1024,
                   PERMANENT_SESSION_LIFETIME=8 * 3600)
 app.json.ensure_ascii = False
 app.register_blueprint(auth.bp)
@@ -475,14 +492,8 @@ def init_data():
     with storage.transaction() as db:
         services.seed(db)
 
-def ggezfunction():
-    print("GG fricking ez")
-
 init_data()
 
 if __name__ == "__main__":
-    print("Code are now running")
-    ggezfunction()
     app.run(debug=False, port=int(os.environ.get("PORT", 8000)))
     
-

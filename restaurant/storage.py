@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -48,6 +49,7 @@ def default_db():
     db["logs"] = []
     db["seq"] = {}
     db["notification_sessions"] = {}
+    db["rate_limits"] = {}
     db["settings"] = {"vat": 7.0, "service": 10.0, "point_per_baht": 10.0,
                       "egg_price": 10.0, "size_price": 20.0}
     return db
@@ -230,3 +232,53 @@ def upload_url(name):
 def next_id(db, coll):
     db["seq"][coll] = db["seq"].get(coll, 0) + 1
     return db["seq"][coll]
+
+
+def take_rate_limit(key, limit, window):
+    """Atomically consume a rate-limit slot across PostgreSQL-backed instances."""
+    now = time.time()
+    if DATABASE_URL or ON_VERCEL:
+        with transaction() as db:
+            buckets = db.setdefault("rate_limits", {})
+            hits = [stamp for stamp in buckets.get(key, []) if now - stamp < window]
+            blocked = len(hits) >= limit
+            if not blocked:
+                hits.append(now)
+            buckets[key] = hits
+            if len(buckets) > 5000:
+                for bucket_key, stamps in list(buckets.items()):
+                    active = [stamp for stamp in stamps if now - stamp < 3600]
+                    if active:
+                        buckets[bucket_key] = active
+                    else:
+                        buckets.pop(bucket_key, None)
+                while len(buckets) > 5000:
+                    buckets.pop(next(iter(buckets)))
+            return blocked
+
+    with _lock:
+        hits = [stamp for stamp in _local_rate_limits.get(key, []) if now - stamp < window]
+        blocked = len(hits) >= limit
+        if not blocked:
+            hits.append(now)
+        _local_rate_limits[key] = hits
+        if len(_local_rate_limits) > 5000:
+            for bucket_key, stamps in list(_local_rate_limits.items()):
+                active = [stamp for stamp in stamps if now - stamp < 3600]
+                if active:
+                    _local_rate_limits[bucket_key] = active
+                else:
+                    _local_rate_limits.pop(bucket_key, None)
+        return blocked
+
+
+def clear_rate_limit(key):
+    if DATABASE_URL or ON_VERCEL:
+        with transaction() as db:
+            db.setdefault("rate_limits", {}).pop(key, None)
+        return
+    with _lock:
+        _local_rate_limits.pop(key, None)
+
+
+_local_rate_limits = {}

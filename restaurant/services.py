@@ -766,7 +766,10 @@ def public_queue(db, data):
 # ---------- first-run data ----------
 def seed(db):
     if not db["users"]:
-        password = os.environ.get("ADMIN_PASSWORD", "Admin1234")
+        password = os.environ.get("ADMIN_PASSWORD", "")
+        if not password:
+            raise RuntimeError("Set ADMIN_PASSWORD before initializing an empty database")
+        check_password_policy(password)
         db["users"].append({"id": next_id(db, "users"), "username": "admin", "name": "ผู้ดูแลระบบ",
                             "phone": "", "role": "admin", "active": True, "points": 0,
                             "session_version": 0,

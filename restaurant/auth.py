@@ -20,7 +20,6 @@ USERNAME_RE = r"[A-Za-z0-9_]{3,20}"
 PHONE_RE = r"\+?[0-9\-]{8,15}"
 
 bp = Blueprint("auth", __name__)
-_hits = {}
 
 
 # ---------- password hashing (scrypt, standard library) ----------
@@ -54,29 +53,19 @@ def find_user(db, username):
     return next((u for u in db["users"] if u["username"].lower() == name), None)
 
 
-# ---------- rate limiting (in memory) ----------
+# ---------- rate limiting ----------
 def client_ip():
     forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
     return forwarded or request.remote_addr or "?"
 
 
-def is_blocked(key, limit, window):
-    now = time.time()
-    if len(_hits) > 5000:
-        _hits.clear()
-    hits = [t for t in _hits.get(key, []) if now - t < window]
-    _hits[key] = hits
-    return len(hits) >= limit
-
-
-def record_hit(key):
-    _hits.setdefault(key, []).append(time.time())
+def take_rate_limit(key, limit, window):
+    return storage.take_rate_limit(key, limit, window)
 
 
 def rate_limit(key, limit, window):
-    if is_blocked(key, limit, window):
+    if take_rate_limit(key, limit, window):
         raise AppError("ส่งคำขอถี่เกินไป กรุณารอสักครู่", 429)
-    record_hit(key)
 
 
 # ---------- current user + role decorator ----------
@@ -153,15 +142,14 @@ def login():
     username = str(request.form.get("username", "")).strip()
     password = str(request.form.get("password", ""))
     key = f"login:{client_ip()}:{username.lower()}"
-    if is_blocked(key, 5, 300):
+    if take_rate_limit(key, 5, 300):
         return render_template("login.html", error="ลองผิดหลายครั้ง กรุณารอ 5 นาที"), 429
     user = find_user(storage.load(), username)
     valid = verify_password(password, user["password_hash"] if user else DUMMY_HASH)
     if not (user and valid and user["active"]):
-        record_hit(key)
         logger.log_action(username or "-", "login_failed", "auth", "", client_ip())
         return render_template("login.html", error="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"), 400
-    _hits.pop(key, None)
+    storage.clear_rate_limit(key)
     start_session(user)
     logger.log_action(user["username"], "login", "auth")
     target = str(request.form.get("next", ""))
@@ -215,11 +203,10 @@ def change_password():
     new_password = str(request.form.get("new_password", ""))
     confirm_password = str(request.form.get("confirm_password", ""))
     key = f"change-password:{g.user['id']}:{client_ip()}"
-    if is_blocked(key, 5, 300):
+    if take_rate_limit(key, 5, 300):
         return render_template("change_password.html", error="ลองผิดหลายครั้ง กรุณารอ 5 นาที"), 429
 
     if not verify_password(current_password, g.user.get("password_hash", "")):
-        record_hit(key)
         return render_template("change_password.html", error="รหัสผ่านปัจจุบันไม่ถูกต้อง"), 400
 
     try:
@@ -239,7 +226,7 @@ def change_password():
     except AppError as e:
         return render_template("change_password.html", error=e.message), e.status
 
-    _hits.pop(key, None)
+    storage.clear_rate_limit(key)
     session["session_version"] = updated_version
     logger.log_action(g.user["username"], "change_password", "auth")
     return render_template("change_password.html", success="เปลี่ยนรหัสผ่านเรียบร้อยแล้ว")
