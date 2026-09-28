@@ -475,10 +475,14 @@ def init_data():
     with storage.transaction() as db:
         services.seed(db)
 
+def ggezfunction():
+    print("GG fricking ez")
 
 init_data()
 
 if __name__ == "__main__":
+    print("Code are now running")
+    ggezfunction()
     app.run(debug=False, port=int(os.environ.get("PORT", 8000)))
+    
 
-print("Hi")
