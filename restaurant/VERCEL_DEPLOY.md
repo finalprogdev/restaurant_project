@@ -4,7 +4,7 @@ The app uses local JSON files when run on a developer machine. On Vercel it uses
 
 ## Connect persistent storage
 
-1. Import this repository as a Python project in Vercel. The project uses the Python 3.12 runtime; Vercel detects the Flask app, and the build step copies `static/` assets to `public/static/` for CDN delivery.
+1. Import this repository as a Python project in Vercel. Set the project's **Root Directory** to `restaurant` (the repository stores this Flask app in that subfolder). The project uses the Python 3.12 runtime; `pyproject.toml` points Vercel to the Flask app at `app:app`, and the build step copies `static/` assets to `public/static/` for CDN delivery.
 2. In the Vercel Marketplace, add a PostgreSQL provider such as Neon and connect it to this project. Make sure the provider supplies `DATABASE_URL` to Production and Preview.
 3. Create a **public** Vercel Blob store and connect it to the project. Vercel adds `BLOB_READ_WRITE_TOKEN` to the selected environments. Menu images are public assets.
 4. Add `SECRET_KEY` and `ADMIN_PASSWORD` as Vercel environment variables. Generate `SECRET_KEY` with `python -c "import secrets; print(secrets.token_hex(32))"`; it must be stable and at least 32 characters. Set a unique bootstrap admin password that is 8–100 characters and contains letters and numbers. Keep each value stable for the environment, and use different values for Production and Preview.
